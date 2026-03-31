@@ -147,13 +147,9 @@ var DynamicTransparency = class {
     }
 
     _updateAlpha(themeBackground) {
-        if (this._windowOverlap && !Main.overview.visibleTarget && Me.settings.get_boolean('trans-use-dynamic-opacity')) {
-            this.alpha = Me.settings.get_double('trans-dynamic-anim-target');
-        } else {
-            this.alpha = Me.settings.get_boolean('trans-use-custom-opacity') ?
-                         Me.settings.get_double('trans-panel-opacity') : 
-                         (themeBackground || this._getThemeBackground()).alpha * 0.003921569; // 1 / 255 = 0.003921569
-        }
+        this.alpha = Me.settings.get_boolean('trans-use-custom-opacity') ?
+                     Me.settings.get_double('trans-panel-opacity') : 
+                     (themeBackground || this._getThemeBackground()).alpha * 0.003921569; // 1 / 255 = 0.003921569
     }
 
     _setBackground() {
