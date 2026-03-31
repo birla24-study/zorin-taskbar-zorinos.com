@@ -21,6 +21,7 @@
 const Clutter = imports.gi.Clutter;
 const GdkPixbuf = imports.gi.GdkPixbuf;
 const Main = imports.ui.main;
+const Mainloop = imports.mainloop;
 const Meta = imports.gi.Meta;
 const St = imports.gi.St;
 const Config = imports.misc.config;
@@ -31,6 +32,10 @@ const Proximity = Me.imports.proximity;
 const Utils = Me.imports.utils;
 
 const TRANS_DYNAMIC_DISTANCE = 20;
+const TRANS_BASE_DURATION_MS = 300;
+const OVERVIEW_OPAQUE_DURATION_MS = 180;
+const OVERVIEW_RESTORE_DELAY_MS = 90;
+const OVERVIEW_RESTORE_DURATION_MS = 420;
 
 var DynamicTransparency = class {
 
@@ -38,6 +43,7 @@ var DynamicTransparency = class {
         this._dtpPanel = dtpPanel;
         this._proximityManager = dtpPanel.panelManager.proximityManager;
         this._proximityWatchId = 0;
+        this._overviewRestoreTimeoutId = 0;
         this.currentBackgroundColor = 0;
 
         this._initialPanelStyle = dtpPanel.panel.get_style();
@@ -50,6 +56,7 @@ var DynamicTransparency = class {
     }
 
     destroy() {
+        this._clearOverviewRestoreTimeout();
         this._signalsHandler.destroy();
         this._proximityManager.removeWatch(this._proximityWatchId);
 
@@ -70,15 +77,24 @@ var DynamicTransparency = class {
             ],
             [
                 Main.overview,
-                [
-                    'showing',
-                    'hiding'
-                ],
-                () => this._updateAlphaAndSet()
+                'showing',
+                () => this._onOverviewShowing()
+            ],
+            [
+                Main.overview,
+                'hiding',
+                () => this._onOverviewHiding()
+            ],
+            [
+                Main.overview,
+                'hidden',
+                () => this._onOverviewHidden()
             ],
             [
                 Me.settings,
                 [
+                    'changed::intellihide',
+                    'changed::intellihide-only-secondary',
                     'changed::trans-use-custom-opacity',
                     'changed::trans-panel-opacity',
                     'changed::trans-dynamic-anim-target',
@@ -89,6 +105,8 @@ var DynamicTransparency = class {
             [
                 Me.settings,
                 [
+                    'changed::intellihide',
+                    'changed::intellihide-only-secondary',
                     'changed::trans-dynamic-behavior',
                     'changed::trans-use-dynamic-opacity'
                 ],
@@ -97,8 +115,22 @@ var DynamicTransparency = class {
         );
     }
 
+    _isPinned() {
+        let intellihideEnabled = Me.settings.get_boolean('intellihide') &&
+                                 !(this._dtpPanel.isPrimary && Me.settings.get_boolean('intellihide-only-secondary'));
+
+        return !intellihideEnabled;
+    }
+
     _updateProximityWatch() {
         this._proximityManager.removeWatch(this._proximityWatchId);
+        this._proximityWatchId = 0;
+
+        if (this._isPinned()) {
+            this._windowOverlap = false;
+            this._updateAlphaAndSet();
+            return;
+        }
 
         if (Me.settings.get_boolean('trans-use-dynamic-opacity')) {
             let isVertical = this._dtpPanel.checkIfVertical();
@@ -122,6 +154,7 @@ var DynamicTransparency = class {
     }
 
     _updateAllAndSet() {
+        this._clearOverviewRestoreTimeout();
         let themeBackground = this._getThemeBackground(true);
 
         this._updateColor(themeBackground);
@@ -136,6 +169,54 @@ var DynamicTransparency = class {
         this._setBackground();
     }
 
+    _clearOverviewRestoreTimeout() {
+        if (this._overviewRestoreTimeoutId) {
+            Mainloop.source_remove(this._overviewRestoreTimeoutId);
+            this._overviewRestoreTimeoutId = 0;
+        }
+    }
+
+    _onOverviewShowing() {
+        this._clearOverviewRestoreTimeout();
+
+        if (this._isPinned()) {
+            this.alpha = 1;
+            this._setBackground(OVERVIEW_OPAQUE_DURATION_MS);
+            return;
+        }
+
+        this._updateAlphaAndSet();
+    }
+
+    _onOverviewHiding() {
+        this._clearOverviewRestoreTimeout();
+
+        if (this._isPinned()) {
+            this.alpha = 1;
+            this._setBackground(OVERVIEW_OPAQUE_DURATION_MS);
+            return;
+        }
+
+        this._updateAlphaAndSet();
+    }
+
+    _onOverviewHidden() {
+        this._clearOverviewRestoreTimeout();
+
+        if (!this._isPinned()) {
+            this._updateAlphaAndSet();
+            return;
+        }
+
+        this._overviewRestoreTimeoutId = Mainloop.timeout_add(OVERVIEW_RESTORE_DELAY_MS, () => {
+            this._overviewRestoreTimeoutId = 0;
+            this._updateAlpha();
+            this._setBackground(OVERVIEW_RESTORE_DURATION_MS);
+
+            return false;
+        });
+    }
+
     _updateComplementaryStyles() {
         let panelThemeNode = this._dtpPanel.panel.get_theme_node();
 
@@ -147,15 +228,26 @@ var DynamicTransparency = class {
     }
 
     _updateAlpha(themeBackground) {
-        this.alpha = Me.settings.get_boolean('trans-use-custom-opacity') ?
-                     Me.settings.get_double('trans-panel-opacity') : 
-                     (themeBackground || this._getThemeBackground()).alpha * 0.003921569; // 1 / 255 = 0.003921569
+        if (this._isPinned()) {
+            this.alpha = Me.settings.get_boolean('trans-use-custom-opacity') ?
+                         Me.settings.get_double('trans-panel-opacity') :
+                         (themeBackground || this._getThemeBackground()).alpha * 0.003921569; // 1 / 255 = 0.003921569
+            return;
+        }
+
+        if (this._windowOverlap && !Main.overview.visibleTarget && Me.settings.get_boolean('trans-use-dynamic-opacity')) {
+            this.alpha = Me.settings.get_double('trans-dynamic-anim-target');
+        } else {
+            this.alpha = Me.settings.get_boolean('trans-use-custom-opacity') ?
+                         Me.settings.get_double('trans-panel-opacity') :
+                         (themeBackground || this._getThemeBackground()).alpha * 0.003921569; // 1 / 255 = 0.003921569
+        }
     }
 
-    _setBackground() {
+    _setBackground(durationMs) {
         this.currentBackgroundColor = Utils.getrgbaColor(this.backgroundColorRgb, this.alpha);
 
-        let transition = 'transition-duration: 300ms;';
+        let transition = 'transition-duration: ' + (durationMs || TRANS_BASE_DURATION_MS) + 'ms;';
 
         this._dtpPanel.set_style('background-color: ' + this.currentBackgroundColor + transition + this._complementaryStyles);
     }
@@ -165,7 +257,7 @@ var DynamicTransparency = class {
             'background: none; ' + 
             'border-image: none; ' + 
             'background-image: none; ' +
-            'transition-duration: 300ms;'
+            'transition-duration: ' + TRANS_BASE_DURATION_MS + 'ms;'
         );
     }
 
